@@ -48,6 +48,53 @@ const escapeCsvValue = (value: unknown): string => {
   return /[",\n]/.test(escaped) ? `"${escaped}"` : escaped;
 };
 
+const parseCsvLine = (line: string): string[] => {
+  const values: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === ',' && !inQuotes) {
+      values.push(current);
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  values.push(current);
+  return values;
+};
+
+const parseCsvRows = (csvText: string): Record<string, string>[] => {
+  const lines = csvText.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (lines.length < 2) {
+    return [];
+  }
+
+  const headers = parseCsvLine(lines[0]).map((header) => header.trim());
+  return lines.slice(1).map((line) => {
+    const values = parseCsvLine(line);
+    return headers.reduce((row, header, index) => {
+      row[header] = values[index] ?? '';
+      return row;
+    }, {} as Record<string, string>);
+  });
+};
+
 const buildPlatformMetadata = (asset: Asset, platform: ExportPlatform) => {
   const base = {
     name: asset.metadata.name || asset.name,
@@ -244,7 +291,6 @@ export const useAppStore = create<AppStore>()(
         const { assets } = get();
         const traitCounts: Record<string, Record<string, number>> = {};
         
-        // Count occurrences of each trait value
         assets.forEach(asset => {
           Object.entries(asset.traits).forEach(([traitType, value]) => {
             if (!traitCounts[traitType]) {
@@ -254,7 +300,6 @@ export const useAppStore = create<AppStore>()(
           });
         });
 
-        // Calculate rarities and update trait categories
         const updatedCategories = Object.entries(traitCounts).map(([traitType, valueCounts]) => {
           const values = Object.entries(valueCounts).map(([value, count]) => ({
             value,
@@ -291,8 +336,8 @@ export const useAppStore = create<AppStore>()(
 
           if (includeAssets) {
             const zip = new JSZip();
-            const fileName = `metadata.${format}`;
-            zip.file(fileName, format === 'json'
+            const metadataFileName = `metadata.${format}`;
+            zip.file(metadataFileName, format === 'json'
               ? JSON.stringify(metadataRows, null, 2)
               : [
                   ['name', 'description', 'external_url', 'animation_url', 'attributes'],
@@ -309,7 +354,9 @@ export const useAppStore = create<AppStore>()(
             );
 
             assets.forEach((asset) => {
-              zip.file(`assets/${asset.name}${asset.file.name.includes('.') ? '' : ''}${asset.file.name.split('.').pop() ? `.${asset.file.name.split('.').pop()}` : ''}`, asset.file);
+              const extension = asset.file.name.includes('.') ? asset.file.name.split('.').pop() : '';
+              const fileName = extension ? `${asset.name}.${extension}` : asset.name;
+              zip.file(`assets/${fileName}`, asset.file);
             });
 
             const zipBlob = await zip.generateAsync({ type: 'blob' });
@@ -353,8 +400,82 @@ export const useAppStore = create<AppStore>()(
 
       importCSV: async (file) => {
         set({ isLoading: true });
-        // Implementation for CSV import would go here
-        set({ isLoading: false });
+
+        try {
+          const text = await file.text();
+          const rows = parseCsvRows(text);
+          if (rows.length === 0) {
+            return;
+          }
+
+          const assets = get().assets;
+
+          rows.forEach((row) => {
+            const assetName = (row.name || '').trim();
+            if (!assetName) {
+              return;
+            }
+
+            const matchingAsset = assets.find((asset) => {
+              const normalizedAssetName = asset.name.toLowerCase();
+              const normalizedRowName = assetName.toLowerCase();
+              return normalizedAssetName === normalizedRowName || normalizedAssetName === normalizedRowName.replace(/\.[^/.]+$/, '');
+            });
+
+            if (!matchingAsset) {
+              return;
+            }
+
+            const parsedAttributes = (() => {
+              const raw = row.attributes?.trim();
+              if (!raw) {
+                return [] as Array<{ trait_type: string; value: string }>;
+              }
+
+              try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) {
+                  return parsed.filter((item) => item && typeof item === 'object' && 'trait_type' in item && 'value' in item);
+                }
+              } catch {
+                // ignore invalid attribute payloads and fall back to empty list
+              }
+
+              return [] as Array<{ trait_type: string; value: string }>;
+            })();
+
+            const nextTraits = parsedAttributes.reduce((acc, attr) => {
+              acc[attr.trait_type] = String(attr.value);
+              return acc;
+            }, {} as Record<string, string>);
+
+            const nextMetadata = {
+              ...matchingAsset.metadata,
+              name: assetName || matchingAsset.metadata.name,
+              description: row.description ?? matchingAsset.metadata.description,
+              external_url: row.external_url ?? matchingAsset.metadata.external_url,
+              animation_url: row.animation_url ?? matchingAsset.metadata.animation_url,
+              attributes: parsedAttributes.length > 0 ? parsedAttributes : matchingAsset.metadata.attributes
+            };
+
+            set((state) => ({
+              assets: state.assets.map((asset) => asset.id === matchingAsset.id
+                ? {
+                    ...asset,
+                    name: assetName || asset.name,
+                    traits: Object.keys(nextTraits).length > 0 ? { ...asset.traits, ...nextTraits } : asset.traits,
+                    metadata: nextMetadata
+                  }
+                : asset)
+            }));
+          });
+
+          get().calculateTraitRarities();
+        } catch (error) {
+          console.error('CSV import failed:', error);
+        } finally {
+          set({ isLoading: false });
+        }
       }
     }),
     {
