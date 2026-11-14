@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import JSZip from 'jszip';
-import { AppState, Asset, TraitCategory, Project, Trait } from '../types';
+import { AppState, Asset, TraitCategory, Project } from '../types';
 
 export type ExportFormat = 'csv' | 'json';
 export type ExportPlatform = 'opensea' | 'manifold' | 'custom';
@@ -13,30 +13,26 @@ export interface ExportMetadataOptions {
 }
 
 interface AppStore extends AppState {
-  // Actions
   setCurrentProject: (project: Project | null) => void;
   addAssets: (files: File[]) => void;
   removeAsset: (assetId: string) => void;
   updateAsset: (assetId: string, updates: Partial<Asset>) => void;
   setSelectedAssets: (assetIds: string[]) => void;
   toggleAssetSelection: (assetId: string) => void;
-   
-  // Trait management
+
   addTraitCategory: (category: TraitCategory) => void;
   updateTraitCategory: (categoryName: string, updates: Partial<TraitCategory>) => void;
   removeTraitCategory: (categoryName: string) => void;
   updateAssetTraits: (assetId: string, traits: Record<string, string>) => void;
   batchUpdateTraits: (assetIds: string[], traitType: string, value: string) => void;
-   
-  // UI state
+
   toggleDarkMode: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   setActivePanel: (panel: AppState['activePanel']) => void;
   setDraggedAsset: (asset: Asset | null) => void;
   setLoading: (loading: boolean) => void;
   setTutorialMode: (enabled: boolean) => void;
-   
-  // Utility functions
+
   calculateTraitRarities: () => void;
   exportMetadata: (options?: ExportMetadataOptions) => Promise<void>;
   importCSV: (file: File) => Promise<void>;
@@ -53,7 +49,7 @@ const parseCsvLine = (line: string): string[] => {
   let current = '';
   let inQuotes = false;
 
-  for (let i = 0; i < line.length; i++) {
+  for (let i = 0; i < line.length; i += 1) {
     const char = line[i];
 
     if (char === '"') {
@@ -81,9 +77,7 @@ const parseCsvLine = (line: string): string[] => {
 
 const parseCsvRows = (csvText: string): Record<string, string>[] => {
   const lines = csvText.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  if (lines.length < 2) {
-    return [];
-  }
+  if (lines.length < 2) return [];
 
   const headers = parseCsvLine(lines[0]).map((header) => header.trim());
   return lines.slice(1).map((line) => {
@@ -112,7 +106,6 @@ const buildPlatformMetadata = (asset: Asset, platform: ExportPlatform) => {
     return {
       ...base,
       image: asset.url,
-      external_url: base.external_url || undefined,
       attributes: base.attributes
     };
   }
@@ -130,37 +123,37 @@ const buildPlatformMetadata = (asset: Asset, platform: ExportPlatform) => {
   return base;
 };
 
+const getFileType = (file: File): Asset['type'] => {
+  if (file.type.startsWith('image/')) return 'image';
+  if (file.type.startsWith('video/')) return 'video';
+  if (file.type.startsWith('audio/')) return 'audio';
+  if (file.name.endsWith('.glb') || file.name.endsWith('.gltf')) return '3d';
+  return 'image';
+};
+
 const createAssetFromFile = (file: File): Asset => {
-  const id = `asset_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const id = `asset_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
   const type = getFileType(file);
-  
+  const name = file.name.replace(/\.[^/.]+$/, '');
+
   return {
     id,
-    name: file.name.replace(/\.[^/.]+$/, ''), // Remove extension
+    name,
     file,
     type,
     url: URL.createObjectURL(file),
     traits: {},
     metadata: {
-      name: file.name.replace(/\.[^/.]+$/, ''),
+      name,
       description: '',
       attributes: []
     }
   };
 };
 
-const getFileType = (file: File): Asset['type'] => {
-  if (file.type.startsWith('image/')) return 'image';
-  if (file.type.startsWith('video/')) return 'video';
-  if (file.type.startsWith('audio/')) return 'audio';
-  if (file.name.endsWith('.glb') || file.name.endsWith('.gltf')) return '3d';
-  return 'image'; // Default fallback
-};
-
 export const useAppStore = create<AppStore>()(
   persist(
     (set, get) => ({
-      // Initial state
       currentProject: null,
       assets: [],
       traitCategories: [],
@@ -172,34 +165,39 @@ export const useAppStore = create<AppStore>()(
       isLoading: false,
       tutorialMode: true,
 
-      // Actions
       setCurrentProject: (project) => set({ currentProject: project }),
 
       addAssets: (files) => {
         const newAssets = files.map(createAssetFromFile);
-        set((state) => ({
-          assets: [...state.assets, ...newAssets]
-        }));
+        set((state) => ({ assets: [...state.assets, ...newAssets] }));
         get().calculateTraitRarities();
       },
 
       removeAsset: (assetId) => {
-        const assetToRemove = get().assets.find((asset) => asset.id === assetId);
-        if (assetToRemove?.url) {
-          URL.revokeObjectURL(assetToRemove.url);
+        const asset = get().assets.find((item) => item.id === assetId);
+        if (asset?.url) {
+          URL.revokeObjectURL(asset.url);
         }
 
         set((state) => ({
-          assets: state.assets.filter(asset => asset.id !== assetId),
-          selectedAssets: state.selectedAssets.filter(id => id !== assetId)
+          assets: state.assets.filter((item) => item.id !== assetId),
+          selectedAssets: state.selectedAssets.filter((id) => id !== assetId)
         }));
         get().calculateTraitRarities();
       },
 
       updateAsset: (assetId, updates) => {
         set((state) => ({
-          assets: state.assets.map(asset =>
-            asset.id === assetId ? { ...asset, ...updates } : asset
+          assets: state.assets.map((asset) =>
+            asset.id === assetId
+              ? {
+                  ...asset,
+                  ...updates,
+                  metadata: updates.metadata
+                    ? { ...asset.metadata, ...updates.metadata }
+                    : asset.metadata
+                }
+              : asset
           )
         }));
       },
@@ -209,20 +207,18 @@ export const useAppStore = create<AppStore>()(
       toggleAssetSelection: (assetId) => {
         set((state) => ({
           selectedAssets: state.selectedAssets.includes(assetId)
-            ? state.selectedAssets.filter(id => id !== assetId)
+            ? state.selectedAssets.filter((id) => id !== assetId)
             : [...state.selectedAssets, assetId]
         }));
       },
 
       addTraitCategory: (category) => {
-        set((state) => ({
-          traitCategories: [...state.traitCategories, category]
-        }));
+        set((state) => ({ traitCategories: [...state.traitCategories, category] }));
       },
 
       updateTraitCategory: (categoryName, updates) => {
         set((state) => ({
-          traitCategories: state.traitCategories.map(category =>
+          traitCategories: state.traitCategories.map((category) =>
             category.name === categoryName ? { ...category, ...updates } : category
           )
         }));
@@ -230,48 +226,43 @@ export const useAppStore = create<AppStore>()(
 
       removeTraitCategory: (categoryName) => {
         set((state) => ({
-          traitCategories: state.traitCategories.filter(category => category.name !== categoryName)
+          traitCategories: state.traitCategories.filter((category) => category.name !== categoryName)
         }));
       },
 
       updateAssetTraits: (assetId, traits) => {
         set((state) => ({
-          assets: state.assets.map(asset =>
-            asset.id === assetId
-              ? {
-                  ...asset,
-                  traits,
-                  metadata: {
-                    ...asset.metadata,
-                    attributes: Object.entries(traits).map(([trait_type, value]) => ({
-                      trait_type,
-                      value
-                    }))
-                  }
-                }
-              : asset
-          )
+          assets: state.assets.map((asset) => {
+            if (asset.id !== assetId) return asset;
+            return {
+              ...asset,
+              traits,
+              metadata: {
+                ...asset.metadata,
+                attributes: Object.entries(traits).map(([trait_type, value]) => ({ trait_type, value }))
+              }
+            };
+          })
         }));
         get().calculateTraitRarities();
       },
 
       batchUpdateTraits: (assetIds, traitType, value) => {
         set((state) => ({
-          assets: state.assets.map(asset =>
-            assetIds.includes(asset.id)
-              ? {
-                  ...asset,
-                  traits: { ...asset.traits, [traitType]: value },
-                  metadata: {
-                    ...asset.metadata,
-                    attributes: [
-                      ...asset.metadata.attributes.filter(attr => attr.trait_type !== traitType),
-                      { trait_type: traitType, value }
-                    ]
-                  }
-                }
-              : asset
-          )
+          assets: state.assets.map((asset) => {
+            if (!assetIds.includes(asset.id)) return asset;
+            return {
+              ...asset,
+              traits: { ...asset.traits, [traitType]: value },
+              metadata: {
+                ...asset.metadata,
+                attributes: [
+                  ...asset.metadata.attributes.filter((attr) => attr.trait_type !== traitType),
+                  { trait_type: traitType, value }
+                ]
+              }
+            };
+          })
         }));
         get().calculateTraitRarities();
       },
@@ -290,29 +281,23 @@ export const useAppStore = create<AppStore>()(
       calculateTraitRarities: () => {
         const { assets } = get();
         const traitCounts: Record<string, Record<string, number>> = {};
-        
-        assets.forEach(asset => {
+
+        assets.forEach((asset) => {
           Object.entries(asset.traits).forEach(([traitType, value]) => {
-            if (!traitCounts[traitType]) {
-              traitCounts[traitType] = {};
-            }
+            if (!traitCounts[traitType]) traitCounts[traitType] = {};
             traitCounts[traitType][value] = (traitCounts[traitType][value] || 0) + 1;
           });
         });
 
-        const updatedCategories = Object.entries(traitCounts).map(([traitType, valueCounts]) => {
-          const values = Object.entries(valueCounts).map(([value, count]) => ({
+        const updatedCategories = Object.entries(traitCounts).map(([traitType, valueCounts]) => ({
+          name: traitType,
+          values: Object.entries(valueCounts).map(([value, count]) => ({
             value,
             count,
             rarity: assets.length ? (count / assets.length) * 100 : 0
-          }));
-
-          return {
-            name: traitType,
-            values,
-            required: false
-          };
-        });
+          })),
+          required: false
+        }));
 
         set({ traitCategories: updatedCategories });
       },
@@ -325,42 +310,43 @@ export const useAppStore = create<AppStore>()(
           platform = 'opensea'
         } = options;
 
-        if (assets.length === 0) {
-          return;
-        }
+        if (assets.length === 0) return;
 
         set({ isLoading: true });
 
         try {
-          const metadataRows = assets.map((asset) => buildPlatformMetadata(asset, platform));
+          const rows = assets.map((asset) => buildPlatformMetadata(asset, platform));
 
           if (includeAssets) {
             const zip = new JSZip();
             const metadataFileName = `metadata.${format}`;
-            zip.file(metadataFileName, format === 'json'
-              ? JSON.stringify(metadataRows, null, 2)
-              : [
-                  ['name', 'description', 'external_url', 'animation_url', 'attributes'],
-                  ...metadataRows.map((row) => [
-                    row.name,
-                    row.description,
-                    row.external_url || '',
-                    row.animation_url || '',
-                    JSON.stringify(row.attributes)
-                  ])
-                ]
-                  .map((row) => row.map((value) => escapeCsvValue(value)).join(','))
-                  .join('\n')
+
+            zip.file(
+              metadataFileName,
+              format === 'json'
+                ? JSON.stringify(rows, null, 2)
+                : [
+                    ['name', 'description', 'external_url', 'animation_url', 'attributes'],
+                    ...rows.map((row) => [
+                      row.name,
+                      row.description,
+                      row.external_url || '',
+                      row.animation_url || '',
+                      JSON.stringify(row.attributes)
+                    ])
+                  ]
+                    .map((row) => row.map((value) => escapeCsvValue(value)).join(','))
+                    .join('\n')
             );
 
             assets.forEach((asset) => {
-              const extension = asset.file.name.includes('.') ? asset.file.name.split('.').pop() : '';
-              const fileName = extension ? `${asset.name}.${extension}` : asset.name;
+              const fileExt = asset.file.name.includes('.') ? asset.file.name.split('.').pop() : '';
+              const fileName = fileExt ? `${asset.name}.${fileExt}` : asset.name;
               zip.file(`assets/${fileName}`, asset.file);
             });
 
-            const zipBlob = await zip.generateAsync({ type: 'blob' });
-            const url = URL.createObjectURL(zipBlob);
+            const blob = await zip.generateAsync({ type: 'blob' });
+            const url = URL.createObjectURL(blob);
             const anchor = document.createElement('a');
             anchor.href = url;
             anchor.download = `collection-${platform}.zip`;
@@ -369,22 +355,25 @@ export const useAppStore = create<AppStore>()(
             return;
           }
 
-          const content = format === 'json'
-            ? JSON.stringify(metadataRows, null, 2)
-            : [
-                ['name', 'description', 'external_url', 'animation_url', 'attributes'],
-                ...metadataRows.map((row) => [
-                  row.name,
-                  row.description,
-                  row.external_url || '',
-                  row.animation_url || '',
-                  JSON.stringify(row.attributes)
-                ])
-              ]
-                .map((row) => row.map((value) => escapeCsvValue(value)).join(','))
-                .join('\n');
+          const content =
+            format === 'json'
+              ? JSON.stringify(rows, null, 2)
+              : [
+                  ['name', 'description', 'external_url', 'animation_url', 'attributes'],
+                  ...rows.map((row) => [
+                    row.name,
+                    row.description,
+                    row.external_url || '',
+                    row.animation_url || '',
+                    JSON.stringify(row.attributes)
+                  ])
+                ]
+                  .map((row) => row.map((value) => escapeCsvValue(value)).join(','))
+                  .join('\n');
 
-          const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/csv;charset=utf-8' });
+          const blob = new Blob([content], {
+            type: format === 'json' ? 'application/json' : 'text/csv;charset=utf-8'
+          });
           const url = URL.createObjectURL(blob);
           const anchor = document.createElement('a');
           anchor.href = url;
@@ -404,69 +393,58 @@ export const useAppStore = create<AppStore>()(
         try {
           const text = await file.text();
           const rows = parseCsvRows(text);
-          if (rows.length === 0) {
-            return;
-          }
+          if (rows.length === 0) return;
 
-          const assets = get().assets;
-
+          const currentAssets = get().assets;
           rows.forEach((row) => {
-            const assetName = (row.name || '').trim();
-            if (!assetName) {
-              return;
-            }
+            const name = (row.name || '').trim();
+            if (!name) return;
 
-            const matchingAsset = assets.find((asset) => {
+            const match = currentAssets.find((asset) => {
               const normalizedAssetName = asset.name.toLowerCase();
-              const normalizedRowName = assetName.toLowerCase();
+              const normalizedRowName = name.toLowerCase();
               return normalizedAssetName === normalizedRowName || normalizedAssetName === normalizedRowName.replace(/\.[^/.]+$/, '');
             });
 
-            if (!matchingAsset) {
-              return;
-            }
+            if (!match) return;
 
-            const parsedAttributes = (() => {
-              const raw = row.attributes?.trim();
-              if (!raw) {
-                return [] as Array<{ trait_type: string; value: string }>;
-              }
-
+            let parsedAttributes: Array<{ trait_type: string; value: string }> = [];
+            const rawAttributes = row.attributes?.trim();
+            if (rawAttributes) {
               try {
-                const parsed = JSON.parse(raw);
+                const parsed = JSON.parse(rawAttributes);
                 if (Array.isArray(parsed)) {
-                  return parsed.filter((item) => item && typeof item === 'object' && 'trait_type' in item && 'value' in item);
+                  parsedAttributes = parsed.filter(
+                    (item) => item && typeof item === 'object' && 'trait_type' in item && 'value' in item
+                  ) as Array<{ trait_type: string; value: string }>;
                 }
               } catch {
-                // ignore invalid attribute payloads and fall back to empty list
+                parsedAttributes = [];
               }
+            }
 
-              return [] as Array<{ trait_type: string; value: string }>;
-            })();
-
-            const nextTraits = parsedAttributes.reduce((acc, attr) => {
+            const traits = parsedAttributes.reduce((acc, attr) => {
               acc[attr.trait_type] = String(attr.value);
               return acc;
             }, {} as Record<string, string>);
 
-            const nextMetadata = {
-              ...matchingAsset.metadata,
-              name: assetName || matchingAsset.metadata.name,
-              description: row.description ?? matchingAsset.metadata.description,
-              external_url: row.external_url ?? matchingAsset.metadata.external_url,
-              animation_url: row.animation_url ?? matchingAsset.metadata.animation_url,
-              attributes: parsedAttributes.length > 0 ? parsedAttributes : matchingAsset.metadata.attributes
-            };
-
             set((state) => ({
-              assets: state.assets.map((asset) => asset.id === matchingAsset.id
-                ? {
-                    ...asset,
-                    name: assetName || asset.name,
-                    traits: Object.keys(nextTraits).length > 0 ? { ...asset.traits, ...nextTraits } : asset.traits,
-                    metadata: nextMetadata
+              assets: state.assets.map((asset) => {
+                if (asset.id !== match.id) return asset;
+                return {
+                  ...asset,
+                  name: name || asset.name,
+                  traits: Object.keys(traits).length > 0 ? { ...asset.traits, ...traits } : asset.traits,
+                  metadata: {
+                    ...asset.metadata,
+                    name: name || asset.metadata.name,
+                    description: row.description ?? asset.metadata.description,
+                    external_url: row.external_url ?? asset.metadata.external_url,
+                    animation_url: row.animation_url ?? asset.metadata.animation_url,
+                    attributes: parsedAttributes.length > 0 ? parsedAttributes : asset.metadata.attributes
                   }
-                : asset)
+                };
+              })
             }));
           });
 
