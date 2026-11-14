@@ -25,7 +25,11 @@ export const ExportPanel: React.FC = () => {
   const [platform, setPlatform] = useState<'opensea' | 'manifold' | 'custom'>('opensea');
 
   const handleExport = async () => {
-    await exportMetadata();
+    await exportMetadata({
+      format: exportFormat,
+      includeAssets,
+      platform
+    });
   };
 
   const getExportSummary = () => {
@@ -42,6 +46,9 @@ export const ExportPanel: React.FC = () => {
   };
 
   const summary = getExportSummary();
+  const exportFilename = includeAssets
+    ? `collection-${platform}.zip`
+    : `metadata.${exportFormat}`;
 
   return (
     <div className="h-full flex flex-col">
@@ -217,7 +224,7 @@ export const ExportPanel: React.FC = () => {
               <div className="flex items-center space-x-3">
                 <FileText size={16} className="text-primary-600 dark:text-primary-400" />
                 <span className="text-gray-900 dark:text-white">
-                  metadata.{exportFormat}
+                  {exportFilename}
                 </span>
                 <span className="text-gray-500 dark:text-gray-400">
                   ({summary.totalAssets} entries)
@@ -256,7 +263,7 @@ export const ExportPanel: React.FC = () => {
               whileTap={{ scale: 0.98 }}
               onClick={handleExport}
               disabled={assets.length === 0 || isLoading}
-              className="inline-flex items-center space-x-3 px-8 py-4 bg-primary-600 text-white font-medium rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-lg"
+              className="inline-flex items-center space-x-3 px-8 py-4 bg-primary-600 text-white font-medium rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               <Download size={20} />
               <span>
