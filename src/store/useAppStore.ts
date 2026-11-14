@@ -1,6 +1,16 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import JSZip from 'jszip';
 import { AppState, Asset, TraitCategory, Project, Trait } from '../types';
+
+export type ExportFormat = 'csv' | 'json';
+export type ExportPlatform = 'opensea' | 'manifold' | 'custom';
+
+export interface ExportMetadataOptions {
+  format?: ExportFormat;
+  includeAssets?: boolean;
+  platform?: ExportPlatform;
+}
 
 interface AppStore extends AppState {
   // Actions
@@ -10,14 +20,14 @@ interface AppStore extends AppState {
   updateAsset: (assetId: string, updates: Partial<Asset>) => void;
   setSelectedAssets: (assetIds: string[]) => void;
   toggleAssetSelection: (assetId: string) => void;
-  
+   
   // Trait management
   addTraitCategory: (category: TraitCategory) => void;
   updateTraitCategory: (categoryName: string, updates: Partial<TraitCategory>) => void;
   removeTraitCategory: (categoryName: string) => void;
   updateAssetTraits: (assetId: string, traits: Record<string, string>) => void;
   batchUpdateTraits: (assetIds: string[], traitType: string, value: string) => void;
-  
+   
   // UI state
   toggleDarkMode: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
@@ -25,12 +35,53 @@ interface AppStore extends AppState {
   setDraggedAsset: (asset: Asset | null) => void;
   setLoading: (loading: boolean) => void;
   setTutorialMode: (enabled: boolean) => void;
-  
+   
   // Utility functions
   calculateTraitRarities: () => void;
-  exportMetadata: () => Promise<void>;
+  exportMetadata: (options?: ExportMetadataOptions) => Promise<void>;
   importCSV: (file: File) => Promise<void>;
 }
+
+const escapeCsvValue = (value: unknown): string => {
+  const raw = String(value ?? '');
+  const escaped = raw.replace(/"/g, '""');
+  return /[",\n]/.test(escaped) ? `"${escaped}"` : escaped;
+};
+
+const buildPlatformMetadata = (asset: Asset, platform: ExportPlatform) => {
+  const base = {
+    name: asset.metadata.name || asset.name,
+    description: asset.metadata.description || '',
+    external_url: asset.metadata.external_url || '',
+    animation_url: asset.metadata.animation_url || '',
+    attributes: asset.metadata.attributes.map((attr) => ({
+      trait_type: attr.trait_type,
+      value: attr.value,
+      ...(attr.rarity !== undefined ? { rarity: attr.rarity } : {})
+    }))
+  };
+
+  if (platform === 'manifold') {
+    return {
+      ...base,
+      image: asset.url,
+      external_url: base.external_url || undefined,
+      attributes: base.attributes
+    };
+  }
+
+  if (platform === 'custom') {
+    return {
+      ...base,
+      collection: 'metacreator-app',
+      asset_id: asset.id,
+      asset_type: asset.type,
+      traits: Object.fromEntries(Object.entries(asset.traits))
+    };
+  }
+
+  return base;
+};
 
 const createAssetFromFile = (file: File): Asset => {
   const id = `asset_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -86,6 +137,11 @@ export const useAppStore = create<AppStore>()(
       },
 
       removeAsset: (assetId) => {
+        const assetToRemove = get().assets.find((asset) => asset.id === assetId);
+        if (assetToRemove?.url) {
+          URL.revokeObjectURL(assetToRemove.url);
+        }
+
         set((state) => ({
           assets: state.assets.filter(asset => asset.id !== assetId),
           selectedAssets: state.selectedAssets.filter(id => id !== assetId)
@@ -203,7 +259,7 @@ export const useAppStore = create<AppStore>()(
           const values = Object.entries(valueCounts).map(([value, count]) => ({
             value,
             count,
-            rarity: (count / assets.length) * 100
+            rarity: assets.length ? (count / assets.length) * 100 : 0
           }));
 
           return {
@@ -216,34 +272,78 @@ export const useAppStore = create<AppStore>()(
         set({ traitCategories: updatedCategories });
       },
 
-      exportMetadata: async () => {
+      exportMetadata: async (options = {}) => {
         const { assets } = get();
+        const {
+          format = 'csv',
+          includeAssets = true,
+          platform = 'opensea'
+        } = options;
+
+        if (assets.length === 0) {
+          return;
+        }
+
         set({ isLoading: true });
 
         try {
-          // Create CSV content
-          const csvHeaders = ['name', 'description', 'external_url', 'animation_url', 'attributes'];
-          const csvRows = assets.map(asset => [
-            asset.metadata.name,
-            asset.metadata.description,
-            asset.metadata.external_url || '',
-            asset.metadata.animation_url || '',
-            JSON.stringify(asset.metadata.attributes)
-          ]);
+          const metadataRows = assets.map((asset) => buildPlatformMetadata(asset, platform));
 
-          const csvContent = [csvHeaders, ...csvRows]
-            .map(row => row.map(field => `"${field}"`).join(','))
-            .join('\n');
+          if (includeAssets) {
+            const zip = new JSZip();
+            const fileName = `metadata.${format}`;
+            zip.file(fileName, format === 'json'
+              ? JSON.stringify(metadataRows, null, 2)
+              : [
+                  ['name', 'description', 'external_url', 'animation_url', 'attributes'],
+                  ...metadataRows.map((row) => [
+                    row.name,
+                    row.description,
+                    row.external_url || '',
+                    row.animation_url || '',
+                    JSON.stringify(row.attributes)
+                  ])
+                ]
+                  .map((row) => row.map((value) => escapeCsvValue(value)).join(','))
+                  .join('\n')
+            );
 
-          // Download CSV
-          const blob = new Blob([csvContent], { type: 'text/csv' });
+            assets.forEach((asset) => {
+              zip.file(`assets/${asset.name}${asset.file.name.includes('.') ? '' : ''}${asset.file.name.split('.').pop() ? `.${asset.file.name.split('.').pop()}` : ''}`, asset.file);
+            });
+
+            const zipBlob = await zip.generateAsync({ type: 'blob' });
+            const url = URL.createObjectURL(zipBlob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = `collection-${platform}.zip`;
+            anchor.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            return;
+          }
+
+          const content = format === 'json'
+            ? JSON.stringify(metadataRows, null, 2)
+            : [
+                ['name', 'description', 'external_url', 'animation_url', 'attributes'],
+                ...metadataRows.map((row) => [
+                  row.name,
+                  row.description,
+                  row.external_url || '',
+                  row.animation_url || '',
+                  JSON.stringify(row.attributes)
+                ])
+              ]
+                .map((row) => row.map((value) => escapeCsvValue(value)).join(','))
+                .join('\n');
+
+          const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/csv;charset=utf-8' });
           const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = 'metadata.csv';
-          a.click();
-          URL.revokeObjectURL(url);
-
+          const anchor = document.createElement('a');
+          anchor.href = url;
+          anchor.download = `metadata.${format}`;
+          anchor.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
         } catch (error) {
           console.error('Export failed:', error);
         } finally {
